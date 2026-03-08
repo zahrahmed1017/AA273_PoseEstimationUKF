@@ -51,6 +51,84 @@ class SPNMeasurements:
 
 # ---------------------------------------------------------------------------
 
+@dataclass
+class SPNPose:
+    """Pose estimate from PnP on SPN keypoint detections.
+
+    Attributes:
+        q: (4,) float64 quaternion [qw, qx, qy, qz] (scalar-first).
+           Represents the rotation from camera frame to target body frame.
+        t: (3,) float64 translation vector in camera frame (metres).
+           Vector from camera origin to target body origin, expressed in camera.
+        num_keypoints: number of non-rejected keypoints used in PnP.
+    """
+    q:             np.ndarray  # (4,)
+    t:             np.ndarray  # (3,)
+    num_keypoints: int
+
+
+def solve_pose(
+    meas:          SPNMeasurements,
+    keypoints_3d:  np.ndarray,
+    camera_matrix: np.ndarray,
+    dist_coeffs:   Optional[np.ndarray] = None,
+    min_keypoints: int = 4,
+) -> Optional[SPNPose]:
+    """Estimate pose from SPN keypoint detections via EPnP.
+
+    Mirrors MyCv::pnp in ukfspn_cpp/src/utils/postprocess.cc and
+    slab-spn/core/utils/postprocess.py:pnp(). Intended for standalone
+    testing of the CNN pipeline against ground-truth labels before UKF
+    integration.
+
+    Args:
+        meas:          SPNMeasurements from SPNWrapper.run_inference().
+        keypoints_3d:  (K, 3) float64 array of 3D keypoint locations in
+                       the target body frame (metres). Must match the K
+                       keypoints in meas.
+        camera_matrix: (3, 3) float64 camera intrinsic matrix.
+        dist_coeffs:   (5,) float64 distortion coefficients [k1,k2,p1,p2,k3].
+                       Pass None or zeros for no distortion.
+        min_keypoints: Minimum number of accepted keypoints required to
+                       attempt PnP. Returns None if not met. Default 4
+                       (minimum for EPnP).
+
+    Returns:
+        SPNPose with q (4,) and t (3,), or None if too few keypoints.
+    """
+    if dist_coeffs is None:
+        dist_coeffs = np.zeros(5, dtype=np.float64)
+
+    # Select non-rejected keypoints
+    accepted = np.where(~meas.reject)[0]
+    if len(accepted) < min_keypoints:
+        return None
+
+    pts_3d = keypoints_3d[accepted].astype(np.float64)       # (N, 3)
+    pts_2d = meas.peaks[accepted].astype(np.float64)         # (N, 2)
+
+    pts_3d = np.ascontiguousarray(pts_3d).reshape(-1, 1, 3)
+    pts_2d = np.ascontiguousarray(pts_2d).reshape(-1, 1, 2)
+
+    _, rvec, tvec = cv2.solvePnP(
+        pts_3d, pts_2d,
+        camera_matrix.astype(np.float64),
+        dist_coeffs.astype(np.float64),
+        flags=cv2.SOLVEPNP_EPNP,
+    )
+
+    R, _ = cv2.Rodrigues(rvec)
+    # scipy returns [qx, qy, qz, qw]; convert to scalar-first [qw, qx, qy, qz]
+    from scipy.spatial.transform import Rotation
+    q_xyzw = Rotation.from_matrix(R).as_quat()
+    q = np.array([q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]], dtype=np.float64)
+    t = tvec.ravel().astype(np.float64)
+
+    return SPNPose(q=q, t=t, num_keypoints=len(accepted))
+
+
+# ---------------------------------------------------------------------------
+
 class SPNWrapper:
     """Inference wrapper around slab-spn's SPNv3.
 

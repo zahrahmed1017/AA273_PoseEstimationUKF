@@ -201,19 +201,47 @@ class SPNWrapper:
         Returns:
             SPNMeasurements with peaks (K,2), covs (K,2,2), maxvals (K,), reject (K,).
         """
-        tensor   = self._preprocess(image, bbox)   # (1, 3, H_in, W_in) on device
-        heatmaps = self._forward(tensor)            # (K, H_hm, W_hm) numpy on CPU
-        return self._postprocess(heatmaps, bbox)
+        tensor, crop_box = self._preprocess(image, bbox)  # (1, 3, H_in, W_in) on device
+        heatmaps         = self._forward(tensor)           # (K, H_hm, W_hm) numpy on CPU
+        return self._postprocess(heatmaps, crop_box)
 
     # -----------------------------------------------------------------------
     # Internal helpers
 
-    def _preprocess(self, image: np.ndarray, bbox: np.ndarray) -> torch.Tensor:
-        """Crop to bbox, resize to CNN input size, apply ImageNet normalization."""
-        xmin, ymin, xmax, ymax = [int(round(v)) for v in bbox]
+    def _preprocess(self, image: np.ndarray, bbox: np.ndarray) -> Tuple[torch.Tensor, np.ndarray]:
+        """Crop, resize to CNN input size, apply ImageNet normalization.
+
+        Matches RandomCropResizeAboutBbox in test mode (test_enlargement_factor=0.2):
+        crops a square region enlarged 20% about the bbox center, then resizes.
+
+        Returns:
+            tensor:   (1, 3, H_in, W_in) on device.
+            crop_box: [x_min, y_min, x_max, y_max] actual crop in original image pixels,
+                      passed to _postprocess for correct coordinate mapping.
+        """
+        H, W = image.shape[:2]
+
+        # Round bbox to integers first, matching RandomCropResizeAboutBbox:
+        #   xmin = int(width * bbox_norm[0] + 0.5)
+        xmin = int(bbox[0] + 0.5)
+        ymin = int(bbox[1] + 0.5)
+        xmax = int(bbox[2] + 0.5)
+        ymax = int(bbox[3] + 0.5)
+
+        # Square RoI centered on bbox, enlarged by 20% (test_enlargement_factor=0.2)
+        cx       = (xmin + xmax) / 2.0
+        cy       = (ymin + ymax) / 2.0
+        roi_size = max(xmax - xmin, ymax - ymin) * 1.2
+
+        x_min = max(0, int(cx - roi_size / 2 + 0.5))
+        x_max = min(W, int(cx + roi_size / 2 + 0.5))
+        y_min = max(0, int(cy - roi_size / 2 + 0.5))
+        y_max = min(H, int(cy + roi_size / 2 + 0.5))
+
+        crop_box = np.array([x_min, y_min, x_max, y_max], dtype=np.float64)
 
         # Crop
-        crop = image[ymin:ymax, xmin:xmax]
+        crop = image[y_min:y_max, x_min:x_max]
 
         # Replicate grayscale to 3 channels (matching spn-torch.cc: tensor.repeat({3,1,1}))
         if crop.ndim == 2:
@@ -224,12 +252,12 @@ class SPNWrapper:
                           interpolation=cv2.INTER_LINEAR)
 
         # uint8 -> float32 [0, 1] -> subtract ImageNet mean / divide std
-        x = crop.astype(np.float32) / 255.0   # (H_in, W_in, 3)
+        x = crop.astype(np.float32) / 255.0
         x = (x - _MEAN) / _STD
 
         # HWC -> CHW, add batch dimension
         tensor = torch.from_numpy(np.transpose(x, (2, 0, 1))).unsqueeze(0)
-        return tensor.to(self.device)
+        return tensor.to(self.device), crop_box
 
     def _forward(self, tensor: torch.Tensor) -> np.ndarray:
         """Run model forward pass; return heatmaps as (K, H_hm, W_hm) numpy array."""
@@ -332,9 +360,9 @@ def _compute_heatmap_covariance(
 def _udp_correction(hmap: np.ndarray, px: float, py: float) -> Tuple[float, float]:
     """Apply UDP sub-pixel correction to a peak location.
 
-    Ported from udp_correction in ukfspn_cpp/src/utils/postprocess.cc.
-    Fits a local 2nd-order Taylor expansion on the log of the Gaussian-blurred
-    heatmap and solves for the sub-pixel peak shift analytically.
+    Matches slab-spn's post_dark_udp (postprocess.py).
+    Fits a local 2nd-order Taylor expansion on the log of the heatmap
+    and solves for the sub-pixel peak shift analytically.
 
     Args:
         hmap: (H, W) float32 heatmap.

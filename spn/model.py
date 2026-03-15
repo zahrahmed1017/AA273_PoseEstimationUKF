@@ -373,8 +373,10 @@ def _udp_correction(hmap: np.ndarray, px: float, py: float) -> Tuple[float, floa
     """
     H, W = hmap.shape
 
-    # Gaussian blur + log (matching postprocess.cc)
-    h = cv2.GaussianBlur(hmap, (_UDP_KERNEL, _UDP_KERNEL), 0).astype(np.float64)
+    # Note: slab-spn's post_dark_udp has a bug where the GaussianBlur result
+    # is never written back to the batch array, so it effectively runs on the
+    # raw heatmap. So I am matching that here to make sure I can replicate results
+    h = hmap.astype(np.float64)
     np.clip(h, 0.001, 50.0, out=h)
     np.log(h, out=h)
 

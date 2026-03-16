@@ -1,1 +1,4 @@
 plotting/figures/
+
+# Cache files:
+__pycache__/*

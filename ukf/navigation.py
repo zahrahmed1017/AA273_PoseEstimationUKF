@@ -59,12 +59,15 @@ class UKFParams:
 
     UKF scaling:
         lambda = alpha^2 * (N + kappa) - N
-        Typical: alpha=1e-3, beta=2 (Gaussian prior), kappa=0
+        With N=12 and alpha=1e-3: (N + lambda) = alpha^2 * N ≈ 1.2e-5  -- extremely
+        small, so any numerical imprecision in P gets amplified into a Cholesky
+        failure within ~40 steps.  Use alpha=0.1 which gives (N + lambda) = 0.12,
+        a much healthier scale while still keeping sigma points close to the mean.
     """
-    alpha: float = 1e-3
+    alpha: float = 0.1
     beta:  float = 2.0
     kappa: float = 0.0
-    dt:    float = 1.0   # timestep [s] -- set from metadata at runtime
+    dt:    float = 5.0   # timestep [s] -- set from metadata at runtime
 
     # Initial state covariance (1-sigma values, will be squared to get P diagonal)
     sigma_roe_da: float = 10.0    # [m]   semi-major axis difference
@@ -72,15 +75,15 @@ class UKFParams:
     sigma_roe_de: float = 1.0     # [m]   eccentricity vector components
     sigma_roe_di: float = 1.0     # [m]   inclination vector components
     sigma_mrp:    float = 0.1     # [-]   MRP (attitude error)
-    sigma_rav:    float = 1e-3    # [rad/s] relative angular velocity
+    sigma_rav:    float = 0.01    # [rad/s] relative angular velocity
 
     # Fixed process noise diagonal values
-    q_roe: float = 1e-6   # applied to all 6 ROE states
-    q_att: float = 1e-8   # applied to all 6 attitude+RAV states
+    q_roe: float = 1e-7   # applied to all 6 ROE states
+    q_att: float = 1e-7   # applied to all 6 attitude+RAV states
 
     # Mahalanobis outlier rejection threshold (chi-squared, 2 DOF)
     # 16.0 corresponds to ~4-sigma for a 2D measurement
-    mahalanobis_threshold: float = 16.0
+    mahalanobis_threshold: float = 9.21
 
     @property
     def lambda_(self) -> float:
@@ -231,7 +234,7 @@ class UKF:
               maxvals [11], reject [11 bool])
         m_abs: MangoAbsState for the first frame
         """
-        from ..spn.model import solve_pose
+        from spn.model import solve_pose
 
         # PnP → initial camera-to-target-body pose
         pose = solve_pose(meas, self.keypoints_3d, self.camera_matrix, self.dist_coeffs)

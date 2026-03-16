@@ -176,7 +176,7 @@ def main():
     # --- Load SPN model ------------------------------------------------------
     print('Loading SPN model...')
     from .navigation import UKF, UKFParams
-    from ..spn.model import SPNWrapper
+    from spn.model import SPNWrapper
 
     spn = SPNWrapper(
         slab_spn_root=args.slab_spn_root,
@@ -197,18 +197,27 @@ def main():
     reject_flags = []
 
     # For saving: store per-frame arrays
-    all_pose_q   = np.zeros((n_frames, 4))
-    all_pose_t   = np.zeros((n_frames, 3))
-    all_gt_q     = gt_qs[:n_frames]
-    all_gt_t     = gt_ts[:n_frames]
-    all_P_diag   = np.zeros((n_frames, 12))
-    all_prefit   = np.zeros((n_frames, 22))
-    all_postfit  = np.zeros((n_frames, 22))
+    all_pose_q    = np.zeros((n_frames, 4))
+    all_pose_t    = np.zeros((n_frames, 3))
+    all_gt_q      = gt_qs[:n_frames]
+    all_gt_t      = gt_ts[:n_frames]
+    all_P_diag    = np.zeros((n_frames, 12))
+    all_prefit    = np.zeros((n_frames, 22))
+    all_postfit   = np.zeros((n_frames, 22))
     all_kpts_pred = np.zeros((n_frames, 11, 2))
+    # Extra arrays used by plot_filter.py to compute camera-frame position covariance
+    all_filter_q  = np.zeros((n_frames, 4))   # internal q_spri2tpri
+    all_filter_roe = np.zeros((n_frames, 6))  # NS-ROE filter state
+    all_meta_kep  = np.zeros((n_frames, 6))   # chief Keplerian for Jacobian propagation
 
     # --- Main loop -----------------------------------------------------------
-    print(f'\n{"Frame":>6}  {"det":>5}  {"rot_err [°]":>11}  {"trans_err [m]":>13}')
-    print('-' * 52)
+    from spn.model import solve_pose
+    from .navigation import _rotation_error_deg
+
+    print(f'\n{"Frame":>6}  {"det":>5}'
+          f'  {"spn_rot[°]":>10}  {"spn_t[m]":>9}'
+          f'  {"ukf_rot[°]":>10}  {"ukf_t[m]":>9}')
+    print('-' * 68)
 
     initialized = False
 
@@ -240,6 +249,15 @@ def main():
         meas = spn.run_inference(image, bbox)
         n_det = int((~meas.reject).sum())
 
+        # --- Raw SPN pose (EPnP on accepted keypoints, no filter) -----------
+        raw_pose = solve_pose(meas, kpts_3d, K_mat, dist)
+        if raw_pose is not None:
+            spn_rot_err   = _rotation_error_deg(raw_pose.q, gt_q)
+            spn_trans_err = float(np.linalg.norm(raw_pose.t - gt_t))
+        else:
+            spn_rot_err   = float('nan')
+            spn_trans_err = float('nan')
+
         if not initialized:
             # Frame 0: initialize filter from PnP
             ukf.initialize(meas, m_abs)
@@ -247,11 +265,6 @@ def main():
 
             # Record initialisation pose
             q_out, t_out = ukf._roe_to_camera_pose(ukf.x[:6], ukf.q, m_abs)
-            rot_err   = float(np.degrees(np.arccos(np.clip(
-                abs(np.dot(q_out, gt_q)), -1.0, 1.0
-            )) * 2))
-            # Use proper rotation error
-            from .navigation import _rotation_error_deg
             rot_err   = _rotation_error_deg(q_out, gt_q)
             trans_err = float(np.linalg.norm(t_out - gt_t))
 
@@ -261,7 +274,9 @@ def main():
             all_P_diag[i]    = np.diag(ukf.P)
             all_kpts_pred[i] = np.zeros((11, 2))   # no prediction on init
 
-            print(f'{i+1:>6}  {n_det:>5}  {rot_err:>11.2f}  {trans_err:>13.4f}  [INIT]')
+            print(f'{i+1:>6}  {n_det:>5}'
+                  f'  {spn_rot_err:>10.2f}  {spn_trans_err:>9.4f}'
+                  f'  {rot_err:>10.2f}  {trans_err:>9.4f}  [INIT]')
         else:
             # Subsequent frames: full UKF step
             rec = ukf.step(meas, m_abs, gt_q=gt_q, gt_t=gt_t)
@@ -280,11 +295,18 @@ def main():
             reject_flags.append(rec.reject_all)
             n_kp_used.append(rec.n_keypoints_used)
 
-            suffix = ' [REJECT ALL]' if rec.reject_all else ''
-            print(f'{i+1:>6}  {n_det:>5}  {rot_err:>11.2f}  {trans_err:>13.4f}{suffix}')
+            suffix = ' [REJ]' if rec.reject_all else ''
+            print(f'{i+1:>6}  {n_det:>5}'
+                  f'  {spn_rot_err:>10.2f}  {spn_trans_err:>9.4f}'
+                  f'  {rot_err:>10.2f}  {trans_err:>9.4f}{suffix}')
 
         rot_errors.append(rot_err)
         trans_errors.append(trans_err)
+
+        # Save common per-frame data for plotting
+        all_filter_q[i]   = ukf.q.copy()          # q_spri2tpri
+        all_filter_roe[i] = ukf.x[:6].copy()      # NS-ROE
+        all_meta_kep[i]   = m_abs.oe_osc_kep.copy()
 
     # --- Summary -------------------------------------------------------------
     if rot_errors:
@@ -316,6 +338,9 @@ def main():
             predicted_kpts = all_kpts_pred[:n_frames],
             rot_errors     = np.array(rot_errors),
             trans_errors   = np.array(trans_errors),
+            filter_q       = all_filter_q[:n_frames],
+            filter_roe     = all_filter_roe[:n_frames],
+            meta_kep       = all_meta_kep[:n_frames],
         )
         print(f'\nResults saved to: {save_path}')
 

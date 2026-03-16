@@ -216,8 +216,9 @@ def main():
 
     print(f'\n{"Frame":>6}  {"det":>5}'
           f'  {"spn_rot[°]":>10}  {"spn_t[m]":>9}'
-          f'  {"ukf_rot[°]":>10}  {"ukf_t[m]":>9}')
-    print('-' * 68)
+          f'  {"ukf_rot[°]":>10}  {"ukf_t[m]":>9}'
+          f'  {"prefit[px]":>10}')
+    print('-' * 80)
 
     initialized = False
 
@@ -263,6 +264,12 @@ def main():
             ukf.initialize(meas, m_abs)
             initialized = True
 
+            # --- Debug: store init state so we can test measurement model
+            #     at frame 2 WITHOUT any propagation (see check below).
+            _debug_init_roe = ukf.x[:6].copy()
+            _debug_init_q   = ukf.q.copy()
+            _debug_init_mabs = m_abs
+
             # Record initialisation pose
             q_out, t_out = ukf._roe_to_camera_pose(ukf.x[:6], ukf.q, m_abs)
             rot_err   = _rotation_error_deg(q_out, gt_q)
@@ -276,7 +283,8 @@ def main():
 
             print(f'{i+1:>6}  {n_det:>5}'
                   f'  {spn_rot_err:>10.2f}  {spn_trans_err:>9.4f}'
-                  f'  {rot_err:>10.2f}  {trans_err:>9.4f}  [INIT]')
+                  f'  {rot_err:>10.2f}  {trans_err:>9.4f}'
+                  f'  {"---":>10}  [INIT]')
         else:
             # Subsequent frames: full UKF step
             rec = ukf.step(meas, m_abs, gt_q=gt_q, gt_t=gt_t)
@@ -295,10 +303,17 @@ def main():
             reject_flags.append(rec.reject_all)
             n_kp_used.append(rec.n_keypoints_used)
 
+            # Mean absolute prefit residual in pixels (over accepted keypoints only)
+            prefit_px = rec.prefit_residual.reshape(11, 2)
+            accepted  = ~meas.reject
+            mean_prefit = float(np.mean(np.linalg.norm(prefit_px[accepted], axis=1))) \
+                          if accepted.any() else float('nan')
+
             suffix = ' [REJ]' if rec.reject_all else ''
             print(f'{i+1:>6}  {n_det:>5}'
                   f'  {spn_rot_err:>10.2f}  {spn_trans_err:>9.4f}'
-                  f'  {rot_err:>10.2f}  {trans_err:>9.4f}{suffix}')
+                  f'  {rot_err:>10.2f}  {trans_err:>9.4f}'
+                  f'  {mean_prefit:>10.1f}{suffix}')
 
         rot_errors.append(rot_err)
         trans_errors.append(trans_err)

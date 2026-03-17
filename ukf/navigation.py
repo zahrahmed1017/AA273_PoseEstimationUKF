@@ -80,6 +80,9 @@ class UKFParams:
     # 16.0 corresponds to ~4-sigma for a 2D measurement
     mahalanobis_threshold: float = 9.21
 
+    # Extra floor:
+    r_floor = 0
+
     @property
     def lambda_(self) -> float:
         return self.alpha**2 * (N_STATES + self.kappa) - N_STATES

@@ -791,19 +791,27 @@ def _cartesian_to_nsroe(
     """
     Convert relative Cartesian state (in spri frame) to NS-ROE for filter init.
 
-    Steps:
-      1. Rotate relative state from spri to ECI
-      2. Add Mango ECI state to get Tango ECI state
-      3. Both -> Keplerian -> NS-ROE via kep_to_roe_ns
+    Chief ECI position is derived from the STORED equinoctial elements (oe_osc_eq), rather
+    than using the actual rv_eci2com_eci directly.  This ensures the roundtrip
+    _cartesian_to_nsroe -> _roe_to_camera_pose is consistent (both use the same
+    chief equinoctial reference).
 
-    Reference: navigation.cc::initialize() + UnscentedKalmanFilter.m::setInitialStateViaCNN()
     """
-    # quat_to_dcm(q_eci2pri) maps pri -> eci  (q_AB maps B -> A, so q_eci2pri maps pri -> eci ✓)
-    R_spri2eci  = quat_to_dcm(m_abs.q_eci2pri)
-    r_tango_eci = m_abs.r_eci2com_eci + R_spri2eci @ r_scom2tcom_spri
-    v_tango_eci = m_abs.v_eci2com_eci + R_spri2eci @ v_scom2tcom_spri
+    # Chief equinoctial from stored metadata (same reference as _roe_to_camera_pose)
+    _a_c = m_abs.oe_osc_eq[0]
+    _f_c = m_abs.oe_osc_eq[1]
+    _g_c = m_abs.oe_osc_eq[2]
+    _p_c = _a_c * (1.0 - _f_c**2 - _g_c**2)
+    eq_mango_p = np.array([_p_c, _f_c, _g_c,
+                           m_abs.oe_osc_eq[3], m_abs.oe_osc_eq[4], m_abs.oe_osc_eq[5]])
+    kep_mango   = equinoctial_to_keplerian(eq_mango_p)
+    rv_mango    = keplerian_to_cartesian(kep_mango)   # chief ECI from stored OEs
 
-    kep_mango = cartesian_to_keplerian(m_abs.r_eci2com_eci, m_abs.v_eci2com_eci)
+    # Rotate relative state to ECI and add to chief ECI position
+    R_spri2eci  = quat_to_dcm(m_abs.q_eci2pri)       # maps spri -> ECI
+    r_tango_eci = rv_mango[:3] + R_spri2eci @ r_scom2tcom_spri
+    v_tango_eci = rv_mango[3:] + R_spri2eci @ v_scom2tcom_spri
+
     kep_tango = cartesian_to_keplerian(r_tango_eci, v_tango_eci)
 
     return kep_to_roe_ns(kep_mango, kep_tango)

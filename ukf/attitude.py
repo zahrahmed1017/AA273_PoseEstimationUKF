@@ -91,7 +91,7 @@ def quat_to_dcm(q: np.ndarray) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# USQUE: MRP ↔ error quaternion  (a=1, f=4)
+# USQUE: MRP to/from error quaternion  (a=1, f=4)
 # ---------------------------------------------------------------------------
 
 def error_quaternion_from_mrp(mrp: np.ndarray) -> np.ndarray:

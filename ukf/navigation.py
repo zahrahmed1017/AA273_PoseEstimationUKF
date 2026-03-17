@@ -9,7 +9,7 @@ State vector (12D):
     x[9:12] = RAV     [w1, w2, w3]                    (rad/s, w_tpri2spri in tpri frame)
 
 Quaternion (stored separately, not part of x):
-    q = [qw, qx, qy, qz]  -- q_spri2tpri (servicer principal → target principal)
+    q = [qw, qx, qy, qz]  -- q_spri2tpri (servicer principal -> target principal)
     ALL quaternions throughout this file use [qw, qx, qy, qz] convention.
 """
 
@@ -102,7 +102,7 @@ class MangoAbsState:
     v_eci2com_eci: np.ndarray   # [3]  ECI velocity of Mango CoM [m/s]
     oe_osc_kep:    np.ndarray   # [6]  Keplerian elements [a, e, i, O, w, M]  (a in metres)
     oe_osc_eq:     np.ndarray   # [6]  Equinoctial elements [a, f, g, h, k, L] (note: a, not p)
-    q_eci2pri:     np.ndarray   # [4]  [qw, qx, qy, qz]  ECI → Mango principal frame
+    q_eci2pri:     np.ndarray   # [4]  [qw, qx, qy, qz]  ECI -> Mango principal frame
     w_pri:         np.ndarray   # [3]  Angular velocity of spri w.r.t. ECI, in spri frame [rad/s]
     m_pri:         np.ndarray   # [3]  External torque on Mango in spri frame [N·m]
 
@@ -168,10 +168,10 @@ class UKF:
     Quat:   q = q_spri2tpri  [qw, qx, qy, qz]
 
     Measurement model:  project Tango 3D keypoints to 2D image plane
-                        via ROE → relative Cartesian → camera pose → projection.
+                        via ROE -> relative Cartesian -> camera pose -> projection.
 
     Attitude parameterisation:  USQUE (Generalised Rodrigues Parameters)
-        a = 1, f = 4  (same as cnnukf and ukfspn_cpp)
+        a = 1, f = 4 
     """
 
     def __init__(
@@ -201,7 +201,7 @@ class UKF:
 
         # Filter state (set properly in initialize())
         self.x = np.zeros(N_STATES)
-        self.P = np.eye(N_STATES)
+        self.P = np.eye(N_STATES) # State covariance
         self.q = np.array([1., 0., 0., 0.])  # [qw, qx, qy, qz]
 
         # Fixed process noise
@@ -218,7 +218,7 @@ class UKF:
         """
         Initialise filter state from first SPN measurement.
 
-        Uses EPnP on the accepted keypoints to get an initial camera→target pose,
+        Uses EPnP on the accepted keypoints to get an initial camera->target pose,
         then converts that pose to the filter state representation.
 
         meas: SPNMeasurement from spn/model.py (fields: peaks [11x2], covs [11x2x2],
@@ -227,7 +227,7 @@ class UKF:
         """
         from spn.model import solve_pose
 
-        # PnP → initial camera-to-target-body pose
+        # PnP -> initial camera-to-target-body pose
         pose = solve_pose(meas, self.keypoints_3d, self.camera_matrix, self.dist_coeffs)
         if pose is None:
             raise RuntimeError("PnP failed on initialization frame -- too few keypoints.")
@@ -237,7 +237,7 @@ class UKF:
         q_scam2tbdy      = pose.q.ravel()
         r_scam2tbdy_scam = pose.t.ravel()
 
-        # Convert camera pose → filter state representation
+        # Convert camera pose -> filter state representation
         q_spri2tpri, r_scom2tcom_spri = _cam_pose_to_filter_state(
             q_scam2tbdy, r_scam2tbdy_scam
         )
@@ -245,8 +245,8 @@ class UKF:
         # Reference quaternion
         self.q = quat_normalize(q_spri2tpri)   # [qw, qx, qy, qz]
 
-        # ROE: need Cartesian relative state → NS-ROE
-        # Assume target not tumbling at t=0 → v ≈ cross(w_mango, r_rel)
+        # ROE: need Cartesian relative state -> NS-ROE
+        # Assume target not tumbling at t=0 -> v ≈ cross(w_mango, r_rel)
         v_scom2tcom_spri = np.cross(m_abs.w_pri, r_scom2tcom_spri)
         roe = _cartesian_to_nsroe(
             r_scom2tcom_spri, v_scom2tcom_spri, m_abs
@@ -254,8 +254,8 @@ class UKF:
 
         # Initial RAV: assume target angular velocity ≈ Mango's (no relative tumbling)
         # w_tpri2spri_tpri = R_spri2tpri * w_mango
-        # quat_to_dcm(q_spri2tpri) maps tpri→spri (passive convention)
-        # so .T maps spri→tpri
+        # quat_to_dcm(q_spri2tpri) maps tpri->spri (passive convention)
+        # so .T maps spri->tpri
         R_spri2tpri = quat_to_dcm(q_spri2tpri).T
         w_tpri2spri_tpri = R_spri2tpri @ m_abs.w_pri
 
@@ -461,8 +461,8 @@ class UKF:
         2D keypoint locations in the image plane.
 
         Measurement model:
-            ROE + q_spri2tpri  →  camera pose (q_scam2tbdy, r_scam2tbdy_scam)
-                               →  cv2.projectPoints  →  [x0,y0, x1,y1, ..., x10,y10]
+            ROE + q_spri2tpri  ->  camera pose (q_scam2tbdy, r_scam2tbdy_scam)
+                               ->  cv2.projectPoints  ->  [x0,y0, x1,y1, ..., x10,y10]
 
         Reference: navigation.cc::measurement_update() inner loop
         """
@@ -615,11 +615,11 @@ class UKF:
         Convert NS-ROE + attitude to camera-to-target-body pose.
 
         Steps:
-          1. ROE → deputy (Tango) Keplerian elements
-          2. Tango Keplerian → ECI Cartesian
-          3. Relative ECI position → principal frame (spri)
-          4. Attitude conversion:  q_spri2tpri → q_scam2tbdy
-          5. Position conversion:  r_scom2tcom_spri → r_scam2tbdy_scam
+          1. ROE -> deputy (Tango) Keplerian elements
+          2. Tango Keplerian -> ECI Cartesian
+          3. Relative ECI position -> principal frame (spri)
+          4. Attitude conversion:  q_spri2tpri -> q_scam2tbdy
+          5. Position conversion:  r_scom2tcom_spri -> r_scam2tbdy_scam
 
         All quaternions [qw, qx, qy, qz].
         Rotation matrix convention:  quat_to_dcm(q_AB) maps frame-B vectors to
@@ -627,7 +627,7 @@ class UKF:
 
         Reference: navigation.cc::spri2tpri_to_scam2tbdy()
         """
-        # --- Step 1-2: ROE → Tango ECI Cartesian ---
+        # --- Step 1-2: ROE -> Tango ECI Cartesian ---
         # Chief (Mango) equinoctial elements in [p, f, g, h, k, L] form
         eq_mango = keplerian_to_equinoctial(m_abs.oe_osc_kep)
         # Deputy (Tango) equinoctial via NS-ROE
@@ -636,11 +636,11 @@ class UKF:
         kep_tango    = equinoctial_to_keplerian(eq_tango)
         rv_tango_eci = keplerian_to_cartesian(kep_tango)    # [6]
 
-        # --- Step 3: Relative position ECI → spri ---
-        # quat_to_dcm(q_pri2eci) @ v_eci = v_pri  (maps ECI → spri)
+        # --- Step 3: Relative position ECI -> spri ---
+        # quat_to_dcm(q_pri2eci) @ v_eci = v_pri  (maps ECI -> spri)
         # q_pri2eci = conjugate of q_eci2pri
         q_pri2eci  = quat_conjugate(m_abs.q_eci2pri)        # [qw, qx, qy, qz]
-        R_eci2spri = quat_to_dcm(q_pri2eci)                 # maps ECI → spri
+        R_eci2spri = quat_to_dcm(q_pri2eci)                 # maps ECI -> spri
         r_scom2tcom_spri = R_eci2spri @ (rv_tango_eci[:3] - m_abs.r_eci2com_eci)
 
         # --- Step 4: Attitude ---
@@ -653,12 +653,12 @@ class UKF:
         )
 
         # --- Step 5: Position ---
-        # R_spri2scam = quat_to_dcm(q_cam2pri)  maps spri → scam
-        # (quat_to_dcm(q_AB) @ v_B = v_A, so q_AB=q_cam2pri maps pri → cam ✓)
+        # R_spri2scam = quat_to_dcm(q_cam2pri)  maps spri -> scam
+        # (quat_to_dcm(q_AB) @ v_B = v_A, so q_AB=q_cam2pri maps pri -> cam ✓)
         R_spri2scam      = quat_to_dcm(q_cam2pri)
         r_scam2tcom_scam = R_spri2scam @ (r_scom2tcom_spri - Mango.r_pri2cam_pri)
 
-        # R_tpri2scam = quat_to_dcm(q_scam2tpri)  maps tpri → scam
+        # R_tpri2scam = quat_to_dcm(q_scam2tpri)  maps tpri -> scam
         q_bdy2tpri   = quat_conjugate(Tango.q_pri2bdy)
         q_scam2tpri  = quat_multiply(q_scam2tbdy, q_bdy2tpri)
         R_tpri2scam  = quat_to_dcm(q_scam2tpri)
@@ -749,14 +749,14 @@ def _cam_pose_to_filter_state(
 
     # --- Position ---
     # r_scam2tbdy_scam = r_scam2tcom_scam + R_tpri2scam * r_tpri2tbdy_tpri
-    # → r_scam2tcom_scam = r_scam2tbdy_scam - R_tpri2scam * r_pri2bdy_pri
+    # -> r_scam2tcom_scam = r_scam2tbdy_scam - R_tpri2scam * r_pri2bdy_pri
     q_bdy2tpri  = quat_conjugate(Tango.q_pri2bdy)
     q_scam2tpri = quat_multiply(q_scam2tbdy, q_bdy2tpri)
-    R_tpri2scam = quat_to_dcm(q_scam2tpri)     # maps tpri → scam
+    R_tpri2scam = quat_to_dcm(q_scam2tpri)     # maps tpri -> scam
     r_scam2tcom_scam = r_scam2tbdy_scam - R_tpri2scam @ Tango.r_pri2bdy_pri
 
-    # r_scam2tcom_scam → r_scom2tcom_spri
-    # quat_to_dcm(q_pri2cam) maps cam → pri  (q_AB maps B → A)
+    # r_scam2tcom_scam -> r_scom2tcom_spri
+    # quat_to_dcm(q_pri2cam) maps cam -> pri  (q_AB maps B -> A)
     R_cam2spri       = quat_to_dcm(Mango.q_pri2cam)
     r_scom2tcom_spri = R_cam2spri @ r_scam2tcom_scam + Mango.r_pri2cam_pri
 
@@ -774,11 +774,11 @@ def _cartesian_to_nsroe(
     Steps:
       1. Rotate relative state from spri to ECI
       2. Add Mango ECI state to get Tango ECI state
-      3. Both → Keplerian → NS-ROE via kep_to_roe_ns
+      3. Both -> Keplerian -> NS-ROE via kep_to_roe_ns
 
     Reference: navigation.cc::initialize() + UnscentedKalmanFilter.m::setInitialStateViaCNN()
     """
-    # quat_to_dcm(q_eci2pri) maps pri → eci  (q_AB maps B → A, so q_eci2pri maps pri → eci ✓)
+    # quat_to_dcm(q_eci2pri) maps pri -> eci  (q_AB maps B -> A, so q_eci2pri maps pri -> eci ✓)
     R_spri2eci  = quat_to_dcm(m_abs.q_eci2pri)
     r_tango_eci = m_abs.r_eci2com_eci + R_spri2eci @ r_scom2tcom_spri
     v_tango_eci = m_abs.v_eci2com_eci + R_spri2eci @ v_scom2tcom_spri
@@ -799,16 +799,16 @@ def _project_keypoints(
     """
     Project 3D Tango keypoints (body frame) to 2D image plane using cv2.
 
-    cv2.projectPoints computes X_cam = R * X_body + t, so R must map body → cam.
+    cv2.projectPoints computes X_cam = R * X_body + t, so R must map body -> cam.
     quat_to_dcm(q_scam2tbdy) produces the same matrix as slab-spn's quat2dcm(q),
-    which maps cam → body. The transpose gives the body → cam rotation needed here.
+    which maps cam -> body. The transpose gives the body -> cam rotation needed here.
     (slab-spn reference: postprocess.py::project_keypoints uses quat2dcm(q).T)
 
     Returns: [22] flat array [x0, y0, x1, y1, ..., x10, y10] in pixels.
     """
     import cv2
 
-    # quat_to_dcm(q_scam2tbdy) maps cam → body; transpose gives body → cam ✓
+    # quat_to_dcm(q_scam2tbdy) maps cam -> body; transpose gives body -> cam ✓
     R_tbdy2scam = quat_to_dcm(q_scam2tbdy).T
     rvec, _     = cv2.Rodrigues(R_tbdy2scam)
     tvec        = r_scam2tbdy_scam.reshape(3, 1)

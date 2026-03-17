@@ -57,25 +57,20 @@ class UKFParams:
     """
     UKF tuning parameters.
 
-    UKF scaling:
-        lambda = alpha^2 * (N + kappa) - N
-        With N=12 and alpha=1e-3: (N + lambda) = alpha^2 * N ≈ 1.2e-5  -- extremely
-        small, so any numerical imprecision in P gets amplified into a Cholesky
-        failure within ~40 steps.  Use alpha=0.1 which gives (N + lambda) = 0.12,
-        a much healthier scale while still keeping sigma points close to the mean.
     """
+
     alpha: float = 0.1
     beta:  float = 2.0
     kappa: float = 0.0
     dt:    float = 5.0   # timestep [s] -- set from metadata at runtime
 
     # Initial state covariance (1-sigma values, will be squared to get P diagonal)
-    sigma_roe_da: float = 10.0    # [m]   semi-major axis difference
-    sigma_roe_dl: float = 10.0    # [m]   mean longitude difference
-    sigma_roe_de: float = 1.0     # [m]   eccentricity vector components
-    sigma_roe_di: float = 1.0     # [m]   inclination vector components
-    sigma_mrp:    float = 0.1     # [-]   MRP (attitude error)
-    sigma_rav:    float = 0.01    # [rad/s] relative angular velocity
+    sigma_roe_da: float = 0.5    # [m]   semi-major axis difference
+    sigma_roe_dl: float = 1.0    # [m]   mean longitude difference
+    sigma_roe_de: float = 0.5     # [m]   eccentricity vector components
+    sigma_roe_di: float = 0.01     # [m]   inclination vector components
+    sigma_mrp:    float = np.deg2rad(10)     # [-]   MRP (attitude error)
+    sigma_rav:    float = np.deg2rad(0.01)    # [rad/s] relative angular velocity
 
     # Fixed process noise diagonal values
     q_roe: float = 1e-7   # applied to all 6 ROE states
@@ -219,10 +214,6 @@ class UKF:
         self.sigma_q = np.zeros((4,        self.p.n_sigmas))  # [4  x 25]
         self.sigma_z = np.zeros((N_MEAS,   self.p.n_sigmas))  # [22 x 25]
 
-    # -----------------------------------------------------------------------
-    # Public API
-    # -----------------------------------------------------------------------
-
     def initialize(self, meas, m_abs: MangoAbsState) -> None:
         """
         Initialise filter state from first SPN measurement.
@@ -317,18 +308,23 @@ class UKF:
         self._sigmas_quat_to_mrp()
         self._inverse_ut_state()
 
-        # --- 4. Predicted measurements ---
+        # --- 4. Re-generate sigma points from a priori mean/cov ---
+        # Fresh sigma points are needed so the cross-covariance T = E[dx dz^T]
+        # uses symmetric deviations centered on the a priori mean
+        self._unscented_transform()
+
+        # --- 5. Predicted measurements ---
         self._predict_measurements(m_abs)
 
-        # --- 5 & 6. Measurement mean, covariance, innovation ---
+        # --- 6 & 7. Measurement mean, covariance, innovation ---
         z_mean, S = self._innovation_covariance(meas)
         innovation = self._compute_innovation(meas, z_mean)
 
         # Store pre-fit residual before Kalman update
         prefit = innovation.copy()
 
-        # --- 7. Outlier rejection + Kalman update ---
-        reject_all = self._post_fit_update(meas, S, innovation)
+        # --- 8. Outlier rejection + Kalman update ---
+        reject_all = self._post_fit_update(meas, S, innovation, z_mean)
 
         # --- Build output record ---
         return self._make_record(meas, m_abs, prefit, reject_all, gt_q, gt_t)
@@ -444,7 +440,13 @@ class UKF:
         """
         # Mean state (weighted sum of sigma points)
         self.x = self.sigma_x @ self.w_mean                 # [12]
-        self.q = quat_normalize(self.sigma_q[:, 0])         # [qw, qx, qy, qz]
+
+        # Absorb mean MRP into reference quaternion, then reset MRP to zero.
+        # This maintains the invariant x[i_mrp] == 0 after every predict step,
+        # making the state easier to inspect and debug.
+        dq     = error_quaternion_from_mrp(self.x[self.i_mrp])
+        self.q = quat_normalize(quat_multiply(self.sigma_q[:, 0], dq))
+        self.x[self.i_mrp] = np.zeros(3)
 
         # State error matrix [12 x 25]: deviation of each sigma point from mean
         dx = self.sigma_x - self.x[:, None]
@@ -495,11 +497,14 @@ class UKF:
         dz  = self.sigma_z - z_mean[:, None]             # [22 x 25]
         Pzz = (self.w_cov * dz) @ dz.T                  # [22 x 22]
 
-        # Measurement noise R -- per-keypoint heatmap covariance
+        # Measurement noise R -- per-keypoint heatmap covariance + noise floor.
+        # The floor accounts for systematic SPN bias that heatmap spread alone
+        # does not capture (peaks can be tight but far from ground truth).
         R = np.zeros((N_MEAS, N_MEAS))
+        floor = self.p.r_floor * np.eye(2)
         for k in range(N_KP):
             if not meas.reject[k]:
-                R[2*k:2*k+2, 2*k:2*k+2] = meas.covs[k]  # [2x2]
+                R[2*k:2*k+2, 2*k:2*k+2] = meas.covs[k] + floor  # [2x2]
 
         S = Pzz + R
         S = 0.5 * (S + S.T)
@@ -519,7 +524,7 @@ class UKF:
             innovation[2*k+1] = meas.peaks[k, 1] - z_mean[2*k+1]
         return innovation
 
-    def _post_fit_update(self, meas, S: np.ndarray, innovation: np.ndarray) -> bool:
+    def _post_fit_update(self, meas, S: np.ndarray, innovation: np.ndarray, z_mean: np.ndarray) -> bool:
         """
         Mahalanobis outlier rejection followed by Kalman gain update.
 
@@ -560,52 +565,44 @@ class UKF:
         reject_all = (n_rejects > 7)
 
         if not reject_all:
-            self._kalman_update(S, innovation)
+            self._kalman_update(S, innovation, z_mean)
 
         return reject_all
 
-    def _kalman_update(self, S: np.ndarray, innovation: np.ndarray) -> None:
+    def _kalman_update(self, S: np.ndarray, innovation: np.ndarray, z_mean: np.ndarray) -> None:
         """
         Kalman gain computation and state/covariance update.
 
-        K = T * S^{-1}   where  T = sum_i w_i * (x_i - x_mean)(z_i - z_mean)^T
+        T = sum_i w_i * (x_i - x_mean)(z_i - z_mean)^T   [12 x 22]
 
-        State update:
-            x += K * innovation
-            q  = q_ref * error_quaternion_from_mrp(x[i_mrp])
+        State update (avoids forming K = T S^{-1} explicitly):
+            x += T * S^{-1} * innovation
+            q  = q * error_quaternion_from_mrp(x[i_mrp])
             x[i_mrp] = 0  (MRP reset)
 
         Covariance update:
-            P -= K * S * K^T
-
-        Reference: navigation.cc::kalman_gain_update()
+            P -= T * S^{-1} * T^T
         """
-        z_mean = self.sigma_z @ self.w_mean              # [22]
-        dx     = self.sigma_x - self.x[:, None]          # [12 x 25]
-        dz     = self.sigma_z - z_mean[:, None]          # [22 x 25]
+        dx = self.sigma_x - self.x[:, None]          # [12 x 25]
+        dz = self.sigma_z - z_mean[:, None]          # [22 x 25]
 
-        # Cross-covariance [12 x 22]
+        # Cross-covariance T [12 x 22]
         T = (self.w_cov * dx) @ dz.T
 
-        # Kalman gain [12 x 22]:  solve  S * K^T = T^T  for K^T
-        K = np.linalg.solve(S.T, T.T).T
+        # State correction: 
+        self.x += T @ np.linalg.solve(S, innovation)
 
-        # State correction
-        correction      = K @ innovation
-        self.x         += correction
-
-        # Quaternion correction via MRP in the update step
-        # [qw, qx, qy, qz] convention throughout
+        # Quaternion correction: absorb MRP correction into reference quaternion
         dq     = error_quaternion_from_mrp(self.x[self.i_mrp])
-        self.q = quat_normalize(quat_multiply(self.sigma_q[:, 0], dq))
-        self.x[self.i_mrp] = np.zeros(3)                 # reset MRP
+        self.q = quat_normalize(quat_multiply(self.q, dq))
+        self.x[self.i_mrp] = np.zeros(3)              # reset MRP to zero
 
-        # Covariance update
-        self.P -= K @ S @ K.T
+        # Covariance update:
+        self.P -= T @ np.linalg.solve(S, T.T)
         self.P  = 0.5 * (self.P + self.P.T)
 
     # -----------------------------------------------------------------------
-    # Geometry: ROE + attitude → camera pose
+    # Geometry: ROE + attitude -> camera pose
     # -----------------------------------------------------------------------
 
     def _roe_to_camera_pose(
@@ -802,17 +799,17 @@ def _project_keypoints(
     """
     Project 3D Tango keypoints (body frame) to 2D image plane using cv2.
 
-    q_scam2tbdy defines the rotation from camera frame to target body frame.
-    quat_to_dcm(q_scam2tbdy) maps tbdy → scam, which is exactly what
-    cv2.projectPoints needs (rotation that takes body-frame points to camera frame).
+    cv2.projectPoints computes X_cam = R * X_body + t, so R must map body → cam.
+    quat_to_dcm(q_scam2tbdy) produces the same matrix as slab-spn's quat2dcm(q),
+    which maps cam → body. The transpose gives the body → cam rotation needed here.
+    (slab-spn reference: postprocess.py::project_keypoints uses quat2dcm(q).T)
 
     Returns: [22] flat array [x0, y0, x1, y1, ..., x10, y10] in pixels.
     """
     import cv2
 
-    # R_tbdy2scam: maps body → camera
-    # quat_to_dcm(q_AB) @ v_B = v_A, so q_AB=q_scam2tbdy → maps tbdy → scam ✓
-    R_tbdy2scam = quat_to_dcm(q_scam2tbdy)
+    # quat_to_dcm(q_scam2tbdy) maps cam → body; transpose gives body → cam ✓
+    R_tbdy2scam = quat_to_dcm(q_scam2tbdy).T
     rvec, _     = cv2.Rodrigues(R_tbdy2scam)
     tvec        = r_scam2tbdy_scam.reshape(3, 1)
 

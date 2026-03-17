@@ -44,6 +44,7 @@ DEFAULT_CHECKPOINT    = os.path.join(DEFAULT_SLAB_SPN_ROOT, 'output',
 DEFAULT_DATASET_ROOT  = '/Users/Zahra1/Documents/Stanford/Research/datasets/shirtv1'
 DEFAULT_TRAJ          = 'roe1'
 DEFAULT_DOMAIN        = 'synthetic'
+DEFAULT_METADATA_JSON = os.path.join(DEFAULT_DATASET_ROOT, DEFAULT_TRAJ, 'metadata.json')
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_LABEL_CSV     = os.path.join(_HERE, '..', 'data', 'roe1.csv')
@@ -51,7 +52,7 @@ DEFAULT_META_CSV      = os.path.join(_HERE, '..', 'data', 'roe1_meta.csv')
 DEFAULT_KEYPOINTS_MAT = os.path.join(DEFAULT_DATASET_ROOT, '..', 'models',
                                      'tango', 'tangoPoints.mat')
 DEFAULT_CAMERA_JSON   = os.path.join(DEFAULT_DATASET_ROOT, 'camera.json')
-DEFAULT_SAVE          = os.path.join(_HERE, '..', 'results', 'run_filter_out.npz')
+DEFAULT_SAVE          = os.path.join(_HERE, '..', 'results', 'run_filter_out.mat')
 
 IMAGE_SIZE = (1920, 1200)   # (W, H) -- VBS camera, used to denormalize bbox
 
@@ -213,8 +214,10 @@ def main():
                         help='Process at most N frames (0 = all)')
     parser.add_argument('--dt',            type=float, default=5.0,
                         help='Filter timestep [s]')
+    parser.add_argument('--metadata-json', default=DEFAULT_METADATA_JSON,
+                        help='Path to metadata.json (provides GT ROE, quaternion, RAV)')
     parser.add_argument('--save',          default=DEFAULT_SAVE,
-                        help='Path to save results .npz (empty = skip)')
+                        help='Path to save results .mat (empty = skip)')
     parser.add_argument('--use-gt-measurements', action='store_true',
                         help='Replace SPN keypoints with GT projected keypoints + small '
                              'noise (R=1 px^2 per axis). Disables outlier rejection. '
@@ -229,6 +232,14 @@ def main():
     print('Loading data...')
     filenames, bboxes, gt_qs, gt_ts, gt_kpts_norm = load_label_csv(args.label_csv)
     meta_rows = load_meta_csv(args.meta_csv)
+
+    # Load metadata.json (GT filter-state quantities)
+    with open(args.metadata_json) as _f:
+        _meta = json.load(_f)
+    _trel = _meta['tRelState']
+    gt_roe_full   = np.array(_trel['roe_osc_ns'],        dtype=np.float64)   # [Nsim x 6]
+    gt_q_spri_full = np.array(_trel['q_spri2tpri'],      dtype=np.float64)   # [Nsim x 4]
+    gt_rav_full   = np.array(_trel['w_tpri2spri_tpri'],  dtype=np.float64)   # [Nsim x 3]
 
     n_frames = len(filenames)
     if args.max_frames > 0:
@@ -285,10 +296,23 @@ def main():
     all_prefit    = np.zeros((n_frames, 22))
     all_postfit   = np.zeros((n_frames, 22))
     all_kpts_pred = np.zeros((n_frames, 11, 2))
-    # Extra arrays used by plot_filter.py to compute camera-frame position covariance
-    all_filter_q  = np.zeros((n_frames, 4))   # internal q_spri2tpri
-    all_filter_roe = np.zeros((n_frames, 6))  # NS-ROE filter state
-    all_meta_kep  = np.zeros((n_frames, 6))   # chief Keplerian for Jacobian propagation
+    # Internal filter state arrays
+    all_filter_q   = np.zeros((n_frames, 4))   # internal q_spri2tpri
+    all_filter_roe = np.zeros((n_frames, 6))   # NS-ROE filter state
+    all_filter_rav = np.zeros((n_frames, 3))   # RAV x[9:12] [rad/s]
+    all_meta_kep   = np.zeros((n_frames, 6))   # chief Keplerian
+
+    # Ground-truth from metadata.json (frame index aligned directly)
+    all_gt_roe    = gt_roe_full[:n_frames]     # [n_frames x 6]  NS-ROE [m]
+    all_gt_q_spri = gt_q_spri_full[:n_frames]  # [n_frames x 4]  q_spri2tpri
+    all_gt_rav    = gt_rav_full[:n_frames]     # [n_frames x 3]  w_tpri2spri_tpri [rad/s]
+
+    # Ground-truth arrays (computed each frame from gt_q / gt_t)
+    all_gt_roe    = np.zeros((n_frames, 6))    # NS-ROE ground truth [m]
+    all_gt_q_spri = np.zeros((n_frames, 4))    # q_spri2tpri GT (for finite-diff RAV)
+
+    # Import geometry helpers used for GT ROE computation
+    from .navigation import _cam_pose_to_filter_state, _cartesian_to_nsroe
 
     # --- Main loop -----------------------------------------------------------
     print(f'\n{"Frame":>6}  {"det":>5}'
@@ -389,6 +413,13 @@ def main():
             all_P_diag[i]    = np.diag(ukf.P)
             all_kpts_pred[i] = np.zeros((11, 2))   # no prediction on init
 
+            # GT ROE and filter RAV at init frame
+            _q_gt_spri, _r_gt = _cam_pose_to_filter_state(gt_q, gt_t)
+            _v_gt = np.cross(m_abs.w_pri, _r_gt)
+            all_gt_roe[i]    = _cartesian_to_nsroe(_r_gt, _v_gt, m_abs)
+            all_gt_q_spri[i] = _q_gt_spri
+            all_filter_rav[i] = ukf.x[9:12]
+
             # --- Debug: round-trip consistency at frame 1 -------------------
             # Check that _cam_pose_to_filter_state → _roe_to_camera_pose is
             # self-consistent when applied to the GT pose.
@@ -465,6 +496,13 @@ def main():
             all_postfit[i]    = rec.postfit_residual
             all_kpts_pred[i]  = rec.predicted_keypoints
 
+            # GT ROE and filter RAV at step frame
+            _q_gt_spri, _r_gt  = _cam_pose_to_filter_state(gt_q, gt_t)
+            _v_gt              = np.cross(m_abs.w_pri, _r_gt)
+            all_gt_roe[i]      = _cartesian_to_nsroe(_r_gt, _v_gt, m_abs)
+            all_gt_q_spri[i]   = _q_gt_spri
+            all_filter_rav[i]  = ukf.x[9:12]
+
             reject_flags.append(rec.reject_all)
             n_kp_used.append(rec.n_keypoints_used)
 
@@ -484,8 +522,9 @@ def main():
         trans_errors.append(trans_err)
 
         # Save common per-frame data for plotting
-        all_filter_q[i]   = ukf.q.copy()          # q_spri2tpri
-        all_filter_roe[i] = ukf.x[:6].copy()      # NS-ROE
+        all_filter_q[i]   = ukf.q.copy()
+        all_filter_roe[i] = ukf.x[:6].copy()
+        all_filter_rav[i] = ukf.x[9:12].copy()
         all_meta_kep[i]   = m_abs.oe_osc_kep.copy()
 
     # --- Summary -------------------------------------------------------------
@@ -504,24 +543,45 @@ def main():
 
     # --- Save results --------------------------------------------------------
     if args.save:
+        from scipy.io import savemat
         save_path = args.save
         os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
-        np.savez(
-            save_path,
-            pose_q         = all_pose_q[:n_frames],
-            pose_t         = all_pose_t[:n_frames],
-            gt_q           = all_gt_q[:n_frames],
-            gt_t           = all_gt_t[:n_frames],
-            P_diag         = all_P_diag[:n_frames],
-            prefit         = all_prefit[:n_frames],
-            postfit        = all_postfit[:n_frames],
-            predicted_kpts = all_kpts_pred[:n_frames],
-            rot_errors     = np.array(rot_errors),
-            trans_errors   = np.array(trans_errors),
-            filter_q       = all_filter_q[:n_frames],
-            filter_roe     = all_filter_roe[:n_frames],
-            meta_kep       = all_meta_kep[:n_frames],
-        )
+
+        # Pad reject_flags / n_kp_used (step-frames only) to full length
+        _reject_arr = np.zeros(n_frames, dtype=np.float64)
+        _nkp_arr    = np.zeros(n_frames, dtype=np.float64)
+        _reject_arr[1:1 + len(reject_flags)] = reject_flags
+        _nkp_arr[1:1 + len(n_kp_used)]      = n_kp_used
+
+        savemat(save_path, {
+            # Time / metadata
+            'time_s'      : (np.arange(n_frames) * args.dt).reshape(-1, 1),
+            'dt'          : float(args.dt),
+            'sma_m'       : float(meta_rows[0].oe_osc_kep[0]),
+            # NS-ROE  [N x 6]  metres  (filter estimate vs GT)
+            'filter_roe'  : all_filter_roe[:n_frames],
+            'gt_roe'      : all_gt_roe[:n_frames],
+            'P_roe_diag'  : all_P_diag[:n_frames, 0:6],
+            # Attitude: q_spri2tpri  [N x 4]  (filter estimate vs GT)
+            'filter_q'    : all_filter_q[:n_frames],
+            'gt_q_spri'   : all_gt_q_spri[:n_frames],
+            'P_mrp_diag'  : all_P_diag[:n_frames, 6:9],
+            # Angular velocity  [N x 3]  rad/s  (filter estimate vs GT)
+            'filter_rav'  : all_filter_rav[:n_frames],
+            'gt_rav'      : all_gt_rav[:n_frames],
+            'P_rav_diag'  : all_P_diag[:n_frames, 9:12],
+            # Camera-frame pose  [N x 4/3]  (for position error plot)
+            'pose_q'      : all_pose_q[:n_frames],
+            'pose_t'      : all_pose_t[:n_frames],
+            'gt_q'        : all_gt_q[:n_frames],
+            'gt_t'        : all_gt_t[:n_frames],
+            # Residuals  [N x 22]  pixels
+            'prefit'      : all_prefit[:n_frames],
+            'postfit'     : all_postfit[:n_frames],
+            # Flags / bookkeeping
+            'reject_all'  : _reject_arr.reshape(-1, 1),
+            'n_kp_used'   : _nkp_arr.reshape(-1, 1),
+        })
         print(f'\nResults saved to: {save_path}')
 
 

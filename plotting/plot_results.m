@@ -8,7 +8,7 @@
 
 clear; close all;
 
-MAT_FILE = fullfile(fileparts(mfilename('fullpath')), '..', 'results', 'run_filter_out.mat');
+MAT_FILE = fullfile(fileparts(mfilename('fullpath')), '..', 'results', 'gt_measurements_full.mat');
 d = load(MAT_FILE);
 
 %% Time axis

@@ -118,9 +118,8 @@ def solve_pose(
     )
 
     R, _ = cv2.Rodrigues(rvec)
-    # scipy returns [qx, qy, qz, qw]; convert to scalar-first [qw, qx, qy, qz]
     from scipy.spatial.transform import Rotation
-    q_xyzw = Rotation.from_matrix(R).as_quat()
+    q_xyzw = Rotation.from_matrix(R).as_quat()   # [qx, qy, qz, qw]
     q = np.array([q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]], dtype=np.float64)
     t = tvec.ravel().astype(np.float64)
 

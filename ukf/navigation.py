@@ -628,20 +628,37 @@ class UKF:
         Reference: navigation.cc::spri2tpri_to_scam2tbdy()
         """
         # --- Step 1-2: ROE -> Tango ECI Cartesian ---
-        # Chief (Mango) equinoctial elements in [p, f, g, h, k, L] form
-        eq_mango = keplerian_to_equinoctial(m_abs.oe_osc_kep)
+        # Use the pre-computed MATLAB equinoctial elements from metadata.json
+        # (oe_osc_eq = [a, f, g, h, k, L]) so L_c is exactly the same value
+        # that MATLAB used when it computed the GT ROE.  Recomputing L from
+        # keplerian_to_equinoctial(oe_osc_kep) can differ by ~3e-7 rad (~2 m).
+        # Convert a -> p = a*(1 - f^2 - g^2) as expected by roe_ns_to_equinoctial.
+        _a_c = m_abs.oe_osc_eq[0]
+        _f_c = m_abs.oe_osc_eq[1]
+        _g_c = m_abs.oe_osc_eq[2]
+        _p_c = _a_c * (1.0 - _f_c**2 - _g_c**2)
+        eq_mango = np.array([_p_c, _f_c, _g_c,
+                             m_abs.oe_osc_eq[3], m_abs.oe_osc_eq[4], m_abs.oe_osc_eq[5]])
+
         # Deputy (Tango) equinoctial via NS-ROE
         eq_tango = roe_ns_to_equinoctial(eq_mango, roe)
-        # Tango ECI state [r(3), v(3)]
+
+        # Compute BOTH chief and deputy ECI positions through the same
+        # equinoctial chain so any round-trip approximation cancels in the
+        # difference.  This mirrors cnnukf nsroe2cart.m: eci_d - eci_c where
+        # both are computed via eq2cart.  Using r_eci2com_eci for the chief
+        # while the deputy goes through the chain introduces a ~2 m offset.
+        kep_mango    = equinoctial_to_keplerian(eq_mango)
+        rv_mango_eci = keplerian_to_cartesian(kep_mango)   # [6]
         kep_tango    = equinoctial_to_keplerian(eq_tango)
-        rv_tango_eci = keplerian_to_cartesian(kep_tango)    # [6]
+        rv_tango_eci = keplerian_to_cartesian(kep_tango)   # [6]
 
         # --- Step 3: Relative position ECI -> spri ---
         # quat_to_dcm(q_pri2eci) @ v_eci = v_pri  (maps ECI -> spri)
         # q_pri2eci = conjugate of q_eci2pri
         q_pri2eci  = quat_conjugate(m_abs.q_eci2pri)        # [qw, qx, qy, qz]
         R_eci2spri = quat_to_dcm(q_pri2eci)                 # maps ECI -> spri
-        r_scom2tcom_spri = R_eci2spri @ (rv_tango_eci[:3] - m_abs.r_eci2com_eci)
+        r_scom2tcom_spri = R_eci2spri @ (rv_tango_eci[:3] - rv_mango_eci[:3])
 
         # --- Step 4: Attitude ---
         # q_scam2tbdy = q_cam2pri * q_spri2tpri * q_pri2bdy

@@ -5,11 +5,6 @@ Inference wrapper around slab-spn's SPN. Handles preprocessing,
 forward pass, peak extraction, UDP sub-pixel correction, and
 per-keypoint heatmap covariance computation for use as UKF measurements.
 
-Porting notes vs. ukfspn_cpp:
-  - Preprocessing  : spn-torch.cc  (to_tensor, ImageNet normalization)
-  - Peak extraction : postprocess.cc (process_hmap, argmax)
-  - UDP correction  : postprocess.cc (udp_correction)
-  - Covariance      : postprocess.cc (process_hmap weighted 2nd moments)
 """
 
 import os
@@ -26,7 +21,7 @@ _MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 _STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 # Heatmap post-processing constants (matching ukf-config.hh / postprocess.cc)
-_HEATMAP_THRESHOLD = 0.003  # values < threshold * peak_val are zeroed
+_HEATMAP_THRESHOLD = 0.01  # values < threshold * peak_val are zeroed
 _UDP_KERNEL        = 11     # Gaussian blur kernel size for UDP correction
 
 

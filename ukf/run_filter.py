@@ -64,17 +64,19 @@ def load_label_csv(path: str):
     """
     Load roe1.csv into parallel arrays.
 
-    Columns:
+    Columns (SHIRT / SPEED+ format):
         [0]     filename
         [1:5]   bbox_norm  [xmin, ymin, xmax, ymax]  normalised to [0,1]
         [5:9]   q_gt       [qw, qx, qy, qz]  ground-truth q_scam2tbdy
         [9:12]  t_gt       [tx, ty, tz]  ground-truth r_scam2tbdy_scam [m]
-        (remaining columns unused here)
+        [12:14] (unused)
+        [14:36] kpts_norm  11 keypoints as [x0_n, y0_n, x1_n, y1_n, ...]  normalised to [0,1]
     """
     filenames  = []
     bboxes     = []
     gt_qs      = []
     gt_ts      = []
+    gt_kpts    = []   # (N, 11, 2) in normalised image coordinates
 
     with open(path) as f:
         for line in f:
@@ -85,8 +87,10 @@ def load_label_csv(path: str):
             bboxes.append(np.array(parts[1:5],  dtype=np.float64))
             gt_qs.append(np.array(parts[5:9],   dtype=np.float64))   # [qw, qx, qy, qz]
             gt_ts.append(np.array(parts[9:12],  dtype=np.float64))
+            kpts = np.array(parts[14:36], dtype=np.float64).reshape(11, 2)  # (11, 2) normalised
+            gt_kpts.append(kpts)
 
-    return filenames, np.array(bboxes), np.array(gt_qs), np.array(gt_ts)
+    return filenames, np.array(bboxes), np.array(gt_qs), np.array(gt_ts), np.array(gt_kpts)
 
 
 def load_meta_csv(path: str):
@@ -157,9 +161,9 @@ def main():
                         help='Path to save results .npz (empty = skip)')
     args = parser.parse_args()
 
-    # --- Load data -----------------------------------------------------------
+    # --- Load ground truth data -----------------------------------------------------------
     print('Loading data...')
-    filenames, bboxes, gt_qs, gt_ts = load_label_csv(args.label_csv)
+    filenames, bboxes, gt_qs, gt_ts, gt_kpts_norm = load_label_csv(args.label_csv)
     meta_rows = load_meta_csv(args.meta_csv)
 
     n_frames = len(filenames)
@@ -195,7 +199,7 @@ def main():
     params = UKFParams(dt=args.dt)
     ukf    = UKF(params, K_mat, dist, kpts_3d)
 
-    # --- Result accumulators -------------------------------------------------
+    # --- Output Arrays -------------------------------------------------
     rot_errors   = []
     trans_errors = []
     n_kp_used    = []

@@ -138,6 +138,62 @@ def load_tango_keypoints(mat_path: str) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# Visualization helper
+# ---------------------------------------------------------------------------
+
+def _plot_keypoints(
+    image:       np.ndarray,   # (H, W) uint8 grayscale
+    kpts_raw:    np.ndarray,   # (11, 2) GT keypoints from CSV, already in pixel coords
+    kpts_solved: np.ndarray,   # (11, 2) GT pose re-projected to image
+    meas,                      # SPNMeasurements  (.peaks (11,2), .reject (11,) bool)
+    frame_idx:   int,
+    block:       bool = False,
+) -> None:
+    """
+    Plot three keypoint sets on the raw image:
+
+      Yellow circles  — Ground truth raw keypoints (direct from label CSV)
+      Cyan   circles  — Ground truth solved keypoints (GT pose re-projected)
+      Green  circles  — SPN accepted detections
+      Red    x marks  — SPN rejected detections
+    """
+    fig, ax = plt.subplots(1, 1, figsize=(14, 9))
+    ax.imshow(image, cmap='gray', vmin=0, vmax=255)
+
+    # GT raw keypoints (from label CSV)
+    ax.scatter(kpts_raw[:, 0], kpts_raw[:, 1],
+               s=100, facecolors='none', edgecolors='yellow', linewidths=2,
+               label='GT raw (CSV)', zorder=3)
+
+    # GT solved keypoints (re-projected from GT pose)
+    ax.scatter(kpts_solved[:, 0], kpts_solved[:, 1],
+               s=100, facecolors='none', edgecolors='cyan', linewidths=2,
+               label='GT solved (re-projected)', zorder=3)
+
+    # SPN detections
+    accepted = ~meas.reject
+    if accepted.any():
+        ax.scatter(meas.peaks[accepted, 0], meas.peaks[accepted, 1],
+                   s=70, facecolors='none', edgecolors='limegreen', linewidths=2,
+                   label=f'SPN accepted ({accepted.sum()})', zorder=4)
+    if meas.reject.any():
+        ax.scatter(meas.peaks[meas.reject, 0], meas.peaks[meas.reject, 1],
+                   s=70, marker='x', c='red', linewidths=2,
+                   label=f'SPN rejected ({meas.reject.sum()})', zorder=4)
+
+    # Keypoint index labels on GT raw points
+    for k, pt in enumerate(kpts_raw):
+        ax.text(pt[0] + 6, pt[1], str(k), color='yellow', fontsize=7)
+
+    ax.set_title(f'Frame {frame_idx} — keypoint comparison', fontsize=13)
+    ax.legend(loc='upper right', fontsize=10)
+    ax.axis('off')
+    plt.tight_layout()
+    plt.show(block=block)
+    plt.pause(0.001)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -159,6 +215,14 @@ def main():
                         help='Filter timestep [s]')
     parser.add_argument('--save',          default=DEFAULT_SAVE,
                         help='Path to save results .npz (empty = skip)')
+    parser.add_argument('--use-gt-measurements', action='store_true',
+                        help='Replace SPN keypoints with GT projected keypoints + small '
+                             'noise (R=1 px^2 per axis). Disables outlier rejection. '
+                             'Use to isolate dynamics/filter bugs from SPN noise.')
+    parser.add_argument('--visualize', action='store_true',
+                        help='Show per-frame keypoint comparison plot.')
+    parser.add_argument('--viz-frames', type=int, default=0,
+                        help='Only visualize the first N frames (0 = all).')
     args = parser.parse_args()
 
     # --- Load ground truth data -----------------------------------------------------------
@@ -197,7 +261,14 @@ def main():
 
     # --- Build UKF -----------------------------------------------------------
     params = UKFParams(dt=args.dt)
-    ukf    = UKF(params, K_mat, dist, kpts_3d)
+    if args.use_gt_measurements:
+        # With noiseless GT measurements, disable outlier rejection (always accept)
+        # and use a small R floor consistent with the injected 1px noise.
+        params.mahalanobis_threshold = 1e9   # effectively never reject
+        params.r_floor               = 0.0   # no extra floor; R = 1 px^2 from covs
+        print('  [GT mode] using ground-truth projected keypoints as measurements')
+        print('  [GT mode] outlier rejection disabled, R = 1 px^2/axis')
+    ukf = UKF(params, K_mat, dist, kpts_3d)
 
     # --- Output Arrays -------------------------------------------------
     rot_errors   = []
@@ -254,7 +325,38 @@ def main():
 
         # SPN inference
         meas = spn.run_inference(image, bbox)
+
+        # --- GT measurement override (--use-gt-measurements) ----------------
+        # Replace SPN keypoints with GT-projected keypoints + tiny noise.
+        # Sets R = 1 px^2/axis for all keypoints (effectively noiseless).
+        if args.use_gt_measurements:
+            from .navigation import _project_keypoints
+            gt_kpts = _project_keypoints(gt_q, gt_t, kpts_3d, K_mat, dist).reshape(11, 2)
+            # Add tiny Gaussian noise so the filter is not fed exact values
+            gt_kpts += np.random.randn(*gt_kpts.shape) * 1.0  # 1 px std
+            from spn.model import SPNMeasurements
+            meas = SPNMeasurements(
+                peaks   = gt_kpts,
+                covs    = np.stack([np.eye(2, dtype=np.float64)] * 11),   # 1 px^2/axis
+                maxvals = np.ones(11, dtype=np.float64),
+                reject  = np.zeros(11, dtype=bool),
+            )
+        # -------------------------------------------------------------------
+
         n_det = int((~meas.reject).sum())
+
+        # --- Keypoint visualization ------------------------------------------
+        if args.visualize and (args.viz_frames == 0 or i < args.viz_frames):
+            from .navigation import _project_keypoints
+            # GT raw keypoints: denormalise from [0,1] to image pixels
+            kpts_raw_px = gt_kpts_norm[i] * np.array([IMAGE_SIZE[0], IMAGE_SIZE[1]])
+            # GT solved: re-project GT pose onto image
+            kpts_solved_px = _project_keypoints(
+                gt_q, gt_t, kpts_3d, K_mat, dist
+            ).reshape(11, 2)
+            _plot_keypoints(image, kpts_raw_px, kpts_solved_px, meas, i + 1,
+                            block=(i == n_frames - 1))
+        # --------------------------------------------------------------------
 
         # --- Raw SPN pose (EPnP on accepted keypoints, no filter) -----------
         raw_pose = solve_pose(meas, kpts_3d, K_mat, dist)
@@ -287,11 +389,68 @@ def main():
             all_P_diag[i]    = np.diag(ukf.P)
             all_kpts_pred[i] = np.zeros((11, 2))   # no prediction on init
 
+            # --- Debug: round-trip consistency at frame 1 -------------------
+            # Check that _cam_pose_to_filter_state → _roe_to_camera_pose is
+            # self-consistent when applied to the GT pose.
+            from .navigation import _project_keypoints, _cam_pose_to_filter_state, _cartesian_to_nsroe
+            kpts_gt1 = _project_keypoints(gt_q, gt_t, kpts_3d, K_mat, dist).reshape(11, 2)
+            q_rt, r_rt = _cam_pose_to_filter_state(gt_q, gt_t)
+            v_rt = np.cross(m_abs.w_pri, r_rt)
+            roe_rt = _cartesian_to_nsroe(r_rt, v_rt, m_abs)
+            q_rt2, t_rt2 = ukf._roe_to_camera_pose(roe_rt, q_rt, m_abs)
+            kpts_rt = _project_keypoints(q_rt2, t_rt2, kpts_3d, K_mat, dist).reshape(11, 2)
+            rt_px  = float(np.mean(np.linalg.norm(kpts_rt - kpts_gt1, axis=1)))
+            rt_rot = _rotation_error_deg(q_rt2, gt_q)
+            rt_t   = float(np.linalg.norm(t_rt2 - gt_t))
+            # SPN vs GT keypoints (SPN noise floor)
+            accepted1 = ~meas.reject
+            spn_vs_gt1 = float(np.mean(np.linalg.norm(
+                meas.peaks[accepted1] - kpts_gt1[accepted1], axis=1)))
+            print(f'\n[DEBUG frame 1] round-trip: GT pose → filter state → camera pose')
+            print(f'  round-trip keypoint err  : {rt_px:.1f} px  (should be ~0 if chain is lossless)')
+            print(f'  round-trip rot / trans   : {rt_rot:.2f} deg  {rt_t:.4f} m')
+            print(f'  SPN detections vs GT kpts: {spn_vs_gt1:.1f} px  (SPN noise level)\n')
+            # ----------------------------------------------------------------
+
             print(f'{i+1:>6}  {n_det:>5}'
                   f'  {spn_rot_err:>10.2f}  {spn_trans_err:>9.4f}'
                   f'  {rot_err:>10.2f}  {trans_err:>9.4f}'
                   f'  {"---":>10}  [INIT]')
         else:
+            # --- Debug check at frame 2 only --------------------------------
+            if i == 1:
+                from .navigation import _project_keypoints
+                # (a) init state + frame-2 m_abs, no propagation
+                q_dbg, t_dbg = ukf._roe_to_camera_pose(
+                    _debug_init_roe, _debug_init_q, m_abs
+                )
+                kpts_dbg = _project_keypoints(
+                    q_dbg, t_dbg, kpts_3d, K_mat, dist
+                ).reshape(11, 2)
+                accepted = ~meas.reject
+                err_dbg = float(np.mean(
+                    np.linalg.norm(kpts_dbg[accepted] - meas.peaks[accepted], axis=1)
+                ))
+                rot_dbg   = _rotation_error_deg(q_dbg, gt_q)
+                trans_dbg = float(np.linalg.norm(t_dbg - gt_t))
+                # (b) GT pose at frame 2 vs SPN detections
+                kpts_gt2 = _project_keypoints(gt_q, gt_t, kpts_3d, K_mat, dist).reshape(11, 2)
+                spn_vs_gt2 = float(np.mean(
+                    np.linalg.norm(meas.peaks[accepted] - kpts_gt2[accepted], axis=1)
+                ))
+                # (c) filter predicted vs GT keypoints
+                filt_vs_gt2 = float(np.mean(
+                    np.linalg.norm(kpts_dbg[accepted] - kpts_gt2[accepted], axis=1)
+                ))
+                print(f'\n[DEBUG frame 2] init state + frame-2 m_abs (NO propagation):')
+                print(f'  filter kpts vs SPN        : {err_dbg:.1f} px')
+                print(f'  filter kpts vs GT kpts    : {filt_vs_gt2:.1f} px  ← filter pose error')
+                print(f'  SPN detections vs GT kpts : {spn_vs_gt2:.1f} px  ← SPN noise at frame 2')
+                print(f'  filter rot / trans vs GT  : {rot_dbg:.2f} deg  {trans_dbg:.4f} m')
+                print(f'  (if SPN vs GT is small but filter vs GT is large → filter pose wrong)')
+                print(f'  (if SPN vs GT ≈ filter vs SPN → SPN is just noisy)\n')
+            # ----------------------------------------------------------------
+
             # Subsequent frames: full UKF step
             rec = ukf.step(meas, m_abs, gt_q=gt_q, gt_t=gt_t)
 

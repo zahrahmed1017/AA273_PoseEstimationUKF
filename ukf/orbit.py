@@ -145,8 +145,6 @@ def keplerian_to_cartesian(oe: np.ndarray) -> np.ndarray:
 def keplerian_to_equinoctial(oe: np.ndarray) -> np.ndarray:
     """
     Convert Keplerian elements to equinoctial elements [p, f, g, h, k, L].
-
-    Source: ukfspn_cpp/slab/orbit-shared.cc::keplerian_to_equinoctial()
     """
     a, e, i, O, w, M = oe
     p = a * (1.0 - e**2)

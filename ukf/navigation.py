@@ -308,15 +308,14 @@ class UKF:
         self._sigmas_quat_to_mrp()
         self._inverse_ut_state()
 
-        # --- 4. Re-generate sigma points from a priori mean/cov ---
-        # Fresh sigma points are needed so the cross-covariance T = E[dx dz^T]
-        # uses symmetric deviations centered on the a priori mean
-        self._unscented_transform()
-
-        # --- 5. Predicted measurements ---
+        # --- 4. Predicted measurements ---
+        # Use propagated sigma points directly (no re-UT). This preserves the
+        # RAV ↔ measurement coupling: each sigma_q[:,i] was integrated with
+        # sigma point i's RAV, so T[RAV, z] is non-zero.
+        # Reference: ukfspn_cpp measurement_update(), cnnukf runUKF.m lines 56-60.
         self._predict_measurements(m_abs)
 
-        # --- 6 & 7. Measurement mean, covariance, innovation ---
+        # --- 5 & 6. Measurement mean, covariance, innovation ---
         z_mean, S = self._innovation_covariance(meas)
         innovation = self._compute_innovation(meas, z_mean)
 
@@ -441,14 +440,15 @@ class UKF:
         # Mean state (weighted sum of sigma points)
         self.x = self.sigma_x @ self.w_mean                 # [12]
 
-        # Absorb mean MRP into reference quaternion, then reset MRP to zero.
-        # This maintains the invariant x[i_mrp] == 0 after every predict step,
-        # making the state easier to inspect and debug.
-        dq     = error_quaternion_from_mrp(self.x[self.i_mrp])
-        self.q = quat_normalize(quat_multiply(self.sigma_q[:, 0], dq))
-        self.x[self.i_mrp] = np.zeros(3)
+        # Reference quaternion = propagated centre sigma point (NOT mean-MRP-absorbed).
+        # The non-zero mean MRP stays in self.x[i_mrp] and will be absorbed together
+        # with the Kalman correction at the end of _kalman_update.
+        # This matches ukfspn_cpp::inverse_unscented_transform_state() and cnnukf
+        # calculateMeanState(), both of which keep fstate.q = sigmas.q[:,0].
+        self.q = quat_normalize(self.sigma_q[:, 0])
 
         # State error matrix [12 x 25]: deviation of each sigma point from mean
+        # (mean MRP is non-zero here, so deviations are properly centred)
         dx = self.sigma_x - self.x[:, None]
 
         # Covariance = weighted outer products + process noise

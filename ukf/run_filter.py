@@ -303,15 +303,11 @@ def main():
     all_meta_kep   = np.zeros((n_frames, 6))   # chief Keplerian
 
     # Ground-truth from metadata.json (frame index aligned directly)
-    all_gt_roe    = gt_roe_full[:n_frames]     # [n_frames x 6]  NS-ROE [m]
-    all_gt_q_spri = gt_q_spri_full[:n_frames]  # [n_frames x 4]  q_spri2tpri
-    all_gt_rav    = gt_rav_full[:n_frames]     # [n_frames x 3]  w_tpri2spri_tpri [rad/s]
+    all_gt_roe    = gt_roe_full[:n_frames].copy()    # [n_frames x 6]  NS-ROE [m]
+    all_gt_q_spri = gt_q_spri_full[:n_frames].copy() # [n_frames x 4]  q_spri2tpri
+    all_gt_rav    = gt_rav_full[:n_frames].copy()    # [n_frames x 3]  w_tpri2spri_tpri [rad/s]
 
-    # Ground-truth arrays (computed each frame from gt_q / gt_t)
-    all_gt_roe    = np.zeros((n_frames, 6))    # NS-ROE ground truth [m]
-    all_gt_q_spri = np.zeros((n_frames, 4))    # q_spri2tpri GT (for finite-diff RAV)
-
-    # Import geometry helpers used for GT ROE computation
+    # Import geometry helpers used for init
     from .navigation import _cam_pose_to_filter_state, _cartesian_to_nsroe
 
     # --- Main loop -----------------------------------------------------------
@@ -413,11 +409,6 @@ def main():
             all_P_diag[i]    = np.diag(ukf.P)
             all_kpts_pred[i] = np.zeros((11, 2))   # no prediction on init
 
-            # GT ROE and filter RAV at init frame
-            _q_gt_spri, _r_gt = _cam_pose_to_filter_state(gt_q, gt_t)
-            _v_gt = np.cross(m_abs.w_pri, _r_gt)
-            all_gt_roe[i]    = _cartesian_to_nsroe(_r_gt, _v_gt, m_abs)
-            all_gt_q_spri[i] = _q_gt_spri
             all_filter_rav[i] = ukf.x[9:12]
 
             # --- Debug: round-trip consistency at frame 1 -------------------
@@ -496,11 +487,6 @@ def main():
             all_postfit[i]    = rec.postfit_residual
             all_kpts_pred[i]  = rec.predicted_keypoints
 
-            # GT ROE and filter RAV at step frame
-            _q_gt_spri, _r_gt  = _cam_pose_to_filter_state(gt_q, gt_t)
-            _v_gt              = np.cross(m_abs.w_pri, _r_gt)
-            all_gt_roe[i]      = _cartesian_to_nsroe(_r_gt, _v_gt, m_abs)
-            all_gt_q_spri[i]   = _q_gt_spri
             all_filter_rav[i]  = ukf.x[9:12]
 
             reject_flags.append(rec.reject_all)

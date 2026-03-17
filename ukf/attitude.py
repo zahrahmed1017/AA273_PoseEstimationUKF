@@ -41,14 +41,17 @@ def quat_multiply(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
     Composition convention:  quat_multiply(q_AB, q_BC) = q_AC
     i.e. q1 is applied first, then q2.
     """
+    q1 = q1 / np.linalg.norm(q1)
+    q2 = q2 / np.linalg.norm(q2)
     w1, x1, y1, z1 = q1
     w2, x2, y2, z2 = q2
-    return np.array([
+    q = np.array([
         w1*w2 - x1*x2 - y1*y2 - z1*z2,
         w1*x2 + x1*w2 + y1*z2 - z1*y2,
         w1*y2 - x1*z2 + y1*w2 + z1*x2,
         w1*z2 + x1*y2 - y1*x2 + z1*w2,
     ])
+    return q / np.linalg.norm(q)
 
 
 def quat_conjugate(q: np.ndarray) -> np.ndarray:
@@ -119,6 +122,8 @@ def mrp_from_error_quaternion(dq: np.ndarray) -> np.ndarray:
     Reference: UnscentedKalmanFilter.m::errorQuatToGRP() with a=1, f=4
                navigation.cc::mrp_from_error_quaternion()
     """
+    if dq[0] < 0:
+        dq = -dq
     qw  = dq[0]
     qv  = dq[1:]
     return (4.0 / (1.0 + qw)) * qv

@@ -211,7 +211,7 @@ def main():
     parser.add_argument('--camera-json',   default=DEFAULT_CAMERA_JSON)
     parser.add_argument('--max-frames',    type=int, default=0,
                         help='Process at most N frames (0 = all)')
-    parser.add_argument('--dt',            type=float, default=1.0,
+    parser.add_argument('--dt',            type=float, default=5.0,
                         help='Filter timestep [s]')
     parser.add_argument('--save',          default=DEFAULT_SAVE,
                         help='Path to save results .npz (empty = skip)')
@@ -374,8 +374,8 @@ def main():
 
             # --- Debug: store init state so we can test measurement model
             #     at frame 2 WITHOUT any propagation (see check below).
-            _debug_init_roe = ukf.x[:6].copy()
-            _debug_init_q   = ukf.q.copy()
+            _debug_init_roe  = ukf.x[:6].copy()
+            _debug_init_q    = ukf.q.copy()
             _debug_init_mabs = m_abs
 
             # Record initialisation pose

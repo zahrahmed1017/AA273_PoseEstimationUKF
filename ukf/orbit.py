@@ -230,3 +230,62 @@ def kep_to_roe_ns(chief_kep: np.ndarray, deputy_kep: np.ndarray) -> np.ndarray:
     diy = a_c * (k_d - k_c)
 
     return np.array([da, dL, dex, dey, dix, diy])
+
+
+def _fmod(x: float, y: float) -> float:
+    """C-style fmod: result has same sign as x (matches C++ std::fmod)."""
+    import math
+    return math.fmod(x, y)
+
+
+def s3_roe_to_keplerian(chief_kep: np.ndarray, s3_roe: np.ndarray) -> np.ndarray:
+    """
+    Convert S3 quasi-nonsingular ROE to deputy Keplerian elements.
+
+    This is the inverse of S3::OEtoROE() from s3/core/s3/s3_relative_state.cc,
+    which is used by the SHIRT dataset's kep2roe MEX function to store roe_osc_ns.
+
+    S3 ROE convention:
+        s3_roe = [ada, adlam, adex, adey, adix, adiy]  [m]
+        ada   = a_d - a_c
+        adlam = a_c * (du + dOmega*cos(i_c))
+        adex  = a_c * (e_d*cos(omega_d) - e_c*cos(omega_c))   ← AOP only, not LOP
+        adey  = a_c * (e_d*sin(omega_d) - e_c*sin(omega_c))
+        adix  = a_c * (i_d - i_c)
+        adiy  = a_c * sin(i_c) * (Omega_d - Omega_c)
+
+    chief_kep: [a, e, i, Omega, omega, M]
+    s3_roe:    [ada, adlam, adex, adey, adix, adiy]
+
+    Returns: deputy [a, e, i, Omega, omega, M]
+
+    Source: S3::ROEtoOE() in s3/core/s3/s3_relative_state.cc (Lucas modified form)
+    Note: uses _fmod (C-style, same sign as x) to match C++ std::fmod behaviour.
+    """
+    ac, ec, ic, Oc, wc, Mc = chief_kep
+    ada, adlam, adex, adey, adix, adiy = s3_roe
+
+    ad  = ada + ac
+    id_ = adix / ac + ic
+    Od  = adiy / (ac * np.sin(ic)) + Oc
+
+    # Deputy eccentricity vector (using chief AOP only, not longitude of perigee)
+    ex_d = adex / ac + ec * np.cos(wc)
+    ey_d = adey / ac + ec * np.sin(wc)
+    ed   = np.sqrt(ex_d**2 + ey_d**2)
+    wd   = np.arctan2(ey_d, ex_d)
+
+    # Wrap dOMEGA — Lucas modified form: C-style fmod to match S3 C++ behaviour
+    dOMEGA = Od - Oc
+    if dOMEGA < 0:
+        dOMEGA = _fmod(dOMEGA - np.pi, 2 * np.pi) + np.pi
+    elif dOMEGA > 0:
+        dOMEGA = _fmod(dOMEGA + np.pi, 2 * np.pi) - np.pi
+
+    # Mean anomaly of deputy
+    du = adlam / ac - dOMEGA * np.cos(ic)
+    Md = du - wd + wc + Mc
+    Md = Md - 2 * np.pi * np.floor(Md / (2 * np.pi))   # wrap to [0, 2pi)
+    Md = _wrap_to_pi(Md)                                  # wrap to (-pi, pi]
+
+    return np.array([ad, ed, id_, Od, wd, Md])

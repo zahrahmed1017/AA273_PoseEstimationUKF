@@ -22,7 +22,12 @@ import json
 import argparse
 import numpy as np
 import cv2
+import matplotlib
+import matplotlib.pyplot as plt
 from scipy.io import loadmat
+from spn.model import solve_pose
+from .navigation import _rotation_error_deg
+
 
 # ---------------------------------------------------------------------------
 # Default paths  (edit these for your machine if you don't want to use flags)
@@ -211,9 +216,6 @@ def main():
     all_meta_kep  = np.zeros((n_frames, 6))   # chief Keplerian for Jacobian propagation
 
     # --- Main loop -----------------------------------------------------------
-    from spn.model import solve_pose
-    from .navigation import _rotation_error_deg
-
     print(f'\n{"Frame":>6}  {"det":>5}'
           f'  {"spn_rot[°]":>10}  {"spn_t[m]":>9}'
           f'  {"ukf_rot[°]":>10}  {"ukf_t[m]":>9}'

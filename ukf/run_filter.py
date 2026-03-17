@@ -222,6 +222,11 @@ def main():
                         help='Replace SPN keypoints with GT projected keypoints + small '
                              'noise (R=1 px^2 per axis). Disables outlier rejection. '
                              'Use to isolate dynamics/filter bugs from SPN noise.')
+    parser.add_argument('--init-from-gt', action='store_true',
+                        help='Initialize filter state directly from metadata.json GT '
+                             '(ROE, q_spri2tpri, RAV) instead of from PnP camera pose. '
+                             'Mirrors cnnukf setInitialStateViaPerturbation. '
+                             'Use to isolate filter dynamics from initialization errors.')
     parser.add_argument('--visualize', action='store_true',
                         help='Show per-frame keypoint comparison plot.')
     parser.add_argument('--viz-frames', type=int, default=0,
@@ -353,7 +358,7 @@ def main():
             from .navigation import _project_keypoints
             gt_kpts = _project_keypoints(gt_q, gt_t, kpts_3d, K_mat, dist).reshape(11, 2)
             # Add tiny Gaussian noise so the filter is not fed exact values
-            gt_kpts += np.random.randn(*gt_kpts.shape) * 1.0  # 1 px std
+            # gt_kpts += np.random.randn(*gt_kpts.shape) * 1.0  # 1 px std
             from spn.model import SPNMeasurements
             meas = SPNMeasurements(
                 peaks   = gt_kpts,
@@ -388,15 +393,20 @@ def main():
             spn_trans_err = float('nan')
 
         if not initialized:
-            # Frame 0: initialize filter from PnP
+            # Frame 0: initialize filter
             ukf.initialize(meas, m_abs)
-            initialized = True
 
-            # --- Debug: store init state so we can test measurement model
-            #     at frame 2 WITHOUT any propagation (see check below).
-            _debug_init_roe  = ukf.x[:6].copy()
-            _debug_init_q    = ukf.q.copy()
-            _debug_init_mabs = m_abs
+            if args.init_from_gt:
+                # Override with GT state from metadata.json (mirrors cnnukf
+                # setInitialStateViaPerturbation which uses x_true{1}).
+                # This bypasses the v=ω×r velocity approximation that introduces
+                # large (~7m) errors in dex/dey/dix/diy ROE components.
+                ukf.x[:6]  = gt_roe_full[i].copy()
+                ukf.q      = gt_q_spri_full[i].copy()
+                ukf.x[6:9] = np.zeros(3)   # MRP reset
+                ukf.x[9:12] = gt_rav_full[i].copy()
+
+            initialized = True
 
             # Record initialisation pose
             q_out, t_out = ukf._roe_to_camera_pose(ukf.x[:6], ukf.q, m_abs)
